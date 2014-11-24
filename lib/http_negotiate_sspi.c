@@ -233,8 +233,27 @@ CURLcode Curl_output_negotiate(struct connectdata *conn, bool proxy)
     &conn->data->state.negotiate;
   char *encoded = NULL;
   size_t len = 0;
-  char *userp;
   CURLcode error;
+  struct auth *authp = proxy
+    ? &conn->data->state.authproxy
+    : &conn->data->state.authhost;
+  char **allocuserpwd = proxy
+    ? &conn->allocptr.proxyuserpwd
+    : &conn->allocptr.userpwd;
+
+  Curl_safefree(*allocuserpwd);
+
+  if(neg_ctx->state == GSS_AUTHSENT) {
+    /* didn't receive a new header since we sent ours; don't send again */
+    authp->done = (neg_ctx->status == SEC_E_OK);
+    return CURLE_OK;
+  }
+
+  authp->done = FALSE;
+  neg_ctx->state = GSS_AUTHNONE;
+
+  if(NULL == neg_ctx->context || GSS_ERROR(neg_ctx->status))
+    return CURLE_OK;
 
   error = Curl_base64_encode(conn->data,
                              (const char*)neg_ctx->output_token,
@@ -246,19 +265,17 @@ CURLcode Curl_output_negotiate(struct connectdata *conn, bool proxy)
   if(!len)
     return CURLE_REMOTE_ACCESS_DENIED;
 
-  userp = aprintf("%sAuthorization: Negotiate %s\r\n", proxy ? "Proxy-" : "",
-                  encoded);
-
-  if(proxy) {
-    Curl_safefree(conn->allocptr.proxyuserpwd);
-    conn->allocptr.proxyuserpwd = userp;
-  }
-  else {
-    Curl_safefree(conn->allocptr.userpwd);
-    conn->allocptr.userpwd = userp;
-  }
+  *allocuserpwd = aprintf("%sAuthorization: Negotiate %s\r\n",
+                          proxy ? "Proxy-" : "",
+                          encoded);
   free(encoded);
-  return (userp == NULL) ? CURLE_OUT_OF_MEMORY : CURLE_OK;
+  if(*allocuserpwd == NULL)
+    return CURLE_OUT_OF_MEMORY;
+
+  authp->done = (neg_ctx->status == SEC_E_OK);
+  neg_ctx->state = GSS_AUTHSENT;
+
+  return CURLE_OK;
 }
 
 static void cleanup(struct negotiatedata *neg_ctx)

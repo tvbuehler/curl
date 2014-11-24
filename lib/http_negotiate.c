@@ -148,9 +148,28 @@ CURLcode Curl_output_negotiate(struct connectdata *conn, bool proxy)
     &conn->data->state.negotiate;
   char *encoded = NULL;
   size_t len = 0;
-  char *userp;
   CURLcode result;
   OM_uint32 discard_st;
+  struct auth *authp = proxy
+    ? &conn->data->state.authproxy
+    : &conn->data->state.authhost;
+  char **allocuserpwd = proxy
+    ? &conn->allocptr.proxyuserpwd
+    : &conn->allocptr.userpwd;
+
+  Curl_safefree(*allocuserpwd);
+
+  if(neg_ctx->state = GSS_AUTHSENT) {
+    /* didn't receive a new header since we sent ours; don't send again */
+    authp->done = (neg_ctx->status == GSS_S_COMPLETE);
+    return CURLE_OK;
+  }
+
+  authp->done = FALSE;
+  neg_ctx->state = GSS_AUTHNONE;
+
+  if(NULL == neg_ctx->context || GSS_ERROR(neg_ctx->status))
+    return CURLE_OK;
 
   result = Curl_base64_encode(conn->data,
                               neg_ctx->output_token.value,
@@ -163,6 +182,10 @@ CURLcode Curl_output_negotiate(struct connectdata *conn, bool proxy)
     return result;
   }
 
+  authp->done = FALSE;
+  neg_ctx->state = GSS_AUTHNONE;
+  Curl_safefree(*allocuserpwd);
+
   if(!encoded || !len) {
     gss_release_buffer(&discard_st, &neg_ctx->output_token);
     neg_ctx->output_token.value = NULL;
@@ -170,20 +193,17 @@ CURLcode Curl_output_negotiate(struct connectdata *conn, bool proxy)
     return CURLE_REMOTE_ACCESS_DENIED;
   }
 
-  userp = aprintf("%sAuthorization: Negotiate %s\r\n", proxy ? "Proxy-" : "",
-                  encoded);
-  if(proxy) {
-    Curl_safefree(conn->allocptr.proxyuserpwd);
-    conn->allocptr.proxyuserpwd = userp;
-  }
-  else {
-    Curl_safefree(conn->allocptr.userpwd);
-    conn->allocptr.userpwd = userp;
-  }
-
+  *allocuserpwd = aprintf("%sAuthorization: Negotiate %s\r\n",
+                          proxy ? "Proxy-" : "",
+                          encoded);
   free(encoded);
+  if(*allocuserpwd == NULL)
+    return CURLE_OUT_OF_MEMORY;
 
-  return (userp == NULL) ? CURLE_OUT_OF_MEMORY : CURLE_OK;
+  authp->done = (neg_ctx->status == GSS_S_COMPLETE);
+  neg_ctx->state = GSS_AUTHSENT;
+
+  return CURLE_OK;
 }
 
 static void cleanup(struct negotiatedata *neg_ctx)
